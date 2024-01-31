@@ -1,10 +1,5 @@
 ##### current repo code 2/12
 
-# AWS Database Migration Workshop
-# Last Updated on May 20, 2021 by hoomanh@
-# updated June 2022 - davegard@amazon.com
-#    updating oracle source snapshot to 19c, changed RDP security group to 127.0.0.1, & added secret mgr for db Password
-# Jan-2023 fixed dms subnets & updates from reinvent2022
 
 AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudFormation Template for AWS Database Migration Workshop.
