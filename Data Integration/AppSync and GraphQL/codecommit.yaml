@@ -1,0 +1,111 @@
+Description: CodeCommit repository populated with code from an S3 bucket
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is tagged to created resources
+    Type: String
+    Default: workshop
+  FrontendRepoName:
+    Description: The name of the CodeCommit Repo for frontend code
+    Type: String
+    Default: appsync-frontend
+  BackendRepoName:
+    Description: The name of the CodeCommit Repo for backend code
+    Type: String
+    Default: appsync-backend
+  RepoDescription:
+    Description: The description of the CodeCommit Repo
+    Type: String
+    Default: A repository for the workshop
+  S3CodeBucket:
+    Description: The S3 Bucket holding the CodeCommit repo zip file. To leave the repository empty, leave blank.
+    Type: String
+    Default: ""
+  S3FrontendCodeKey:
+    Description: The S3 object key of the CodeCommit frontend repo zip file. To leave the repository empty, leave blank.
+    Type: String
+    Default: ""
+  S3BackendCodeKey:
+    Description: The S3 object key of the CodeCommit backend repo zip file. To leave the repository empty, leave blank.
+    Type: String
+    Default: ""
+Conditions: 
+  LoadCodeCommitZipFile: !Not [!Equals [!Ref S3CodeBucket, ""]]
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General Configuration
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: Code Commit Configuration
+        Parameters:
+          - FrontendRepoName
+          - BackendRepoName
+          - RepoDescription
+      - Label:
+          default: S3 Configuration
+        Parameters:
+          - S3CodeBucket
+          - S3FrontendCodeKey
+          - S3BackendCodeKey
+    ParameterLabels:
+      EnvironmentName:
+        default: Environment name    
+      FrontendRepoName:
+        default: Code Commit frontend repository name
+      BackendRepoName:
+        default: Code Commit backend repository name
+      RepoDescription:
+        default: Code Commit repository description
+      S3CodeBucket:
+        default: S3 Bucket name
+      S3FrontendCodeKey:
+        default: S3 Bucket frontend key
+      S3BackendCodeKey:
+        default: S3 Bucket backend key
+Resources:
+  ################## CODECOMMIT REPOSITORY ################
+  FrontendCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryName: !Sub ${FrontendRepoName}
+      RepositoryDescription: !Sub ${RepoDescription}
+      Code: 
+        Fn::If:
+          - LoadCodeCommitZipFile
+          - S3:
+              Bucket: !Sub ${S3CodeBucket}
+              Key: !Sub ${S3FrontendCodeKey}
+          - Ref: AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Sub ${EnvironmentName}
+  BackendCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryName: !Sub ${BackendRepoName}
+      RepositoryDescription: !Sub ${RepoDescription}
+      Code: 
+        Fn::If:
+          - LoadCodeCommitZipFile
+          - S3:
+              Bucket: !Sub ${S3CodeBucket}
+              Key: !Sub ${S3BackendCodeKey}
+          - Ref: AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Sub ${EnvironmentName}
+################## OUTPUTS #####################
+Outputs:
+  FrontendRepoCloneUrlHttp:
+    Export:
+      Name: FrontendRepoCloneUrlHttp
+    Description: URL to use for cloning the frontend repository over HTTPS
+    Value: !GetAtt FrontendCodeCommitRepo.CloneUrlHttp
+  BackendRepoCloneUrlHttp:
+    Export:
+      Name: BackendRepoCloneUrlHttp
+    Description: URL to use for cloning the backend repository over HTTPS
+    Value: !GetAtt BackendCodeCommitRepo.CloneUrlHttp
