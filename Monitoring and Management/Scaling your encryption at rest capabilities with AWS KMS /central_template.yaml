@@ -1,0 +1,503 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: A sample template
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    Description: Name of stage to deploy API to, used for URL generation 
+  lambdaFunctionName:
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9]+[a-zA-Z0-9-]+[a-zA-Z0-9]+"
+    Default: checkSharing
+Resources:
+  Website: #An inline comment
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Description: API that presents static front-end and post request to check sharing status of three services
+      EndpointConfiguration: 
+          Types: 
+            - REGIONAL
+      Name: kmsworkshopapi
+
+  CopyKey: 
+    Type: AWS::KMS::Key 
+    Properties: 
+      Description: An example symmetric CMK 
+      EnableKeyRotation: true 
+      PendingWindowInDays: 20 
+      KeyPolicy: 
+        Version: '2012-10-17' 
+        Id: key-default-1 
+        Statement: 
+          - Sid: Enable IAM User Permissions 
+            Effect: Allow
+            Principal: 
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root 
+            Action: kms:* 
+            Resource: '*' 
+          - Sid: Allow administration of the key
+            Effect: Allow 
+            Principal: 
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root 
+            Action: 
+              - kms:Create* 
+              - kms:Describe* 
+              - kms:Enable* 
+              - kms:List* 
+              - kms:Put* 
+              - kms:Update* 
+              - kms:Revoke* 
+              - kms:Disable* 
+              - kms:Get* 
+              - kms:Delete* 
+              - kms:ScheduleKeyDeletion 
+              - kms:CancelKeyDeletion 
+            Resource: '*' 
+          - Sid: Allow use of the key 
+            Effect: Allow 
+            Principal:
+              AWS: !GetAtt LambdaRole.Arn
+            Action: 
+              - kms:DescribeKey 
+              - kms:Encrypt 
+              - kms:Decrypt 
+              - kms:ReEncrypt* 
+              - kms:GenerateDataKey*
+              - kms:*Grant*
+            Resource: '*' 
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ApiGatewayDeployment
+      Description: API initial deploy
+      RestApiId: !Ref Website
+      StageName: !Ref StageName
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+    - GetMethod
+    - PostMethod
+    Properties:
+      Description: API Deployment
+      RestApiId: !Ref Website
+  
+  PostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties: 
+      AuthorizationType: NONE
+      HttpMethod: POST
+      RestApiId: !Ref Website
+      ResourceId: !GetAtt Website.RootResourceId
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+          - lambdaArn: !GetAtt LambdaFunction.Arn
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: ""
+            StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: {"application/json": "Empty"}
+        - StatusCode: 400
+          ResponseModels: {"application/json": "Empty"}
+  
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+          KMS_Key: !Ref CopyKey
+      FunctionName: !Ref lambdaFunctionName
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Timeout: 30
+      Code:
+        ZipFile: |
+            import json
+            import boto3
+            import os
+
+            def lambda_handler(event, context):
+                
+                if event['service'].lower() == "rds":
+                    try:
+                        resourceId = event['resourceId'].split(':')[6]
+                        client = boto3.client("rds", event['resourceId'].split(':')[3])
+                        # check if already shared
+                        resp = client.describe_db_snapshots(DBSnapshotIdentifier='copied-' + resourceId)
+                        if len(resp['DBSnapshots']) != 0:
+                            return {
+                                    'statusCode': 200,
+                                    'body': json.dumps('Resource already shared.')
+                                }
+                    except Exception as error:
+                        if error.response['Error']['Code'] != "DBSnapshotNotFound":
+                            return {
+                                'statusCode': 400,
+                                'body': json.dumps('Failed to share because {}'.format(error))
+                            }
+                        else:
+                            try:
+                                resp = client.copy_db_snapshot(
+                                    SourceDBSnapshotIdentifier=event['resourceId'],
+                                    TargetDBSnapshotIdentifier='copied-' + resourceId,
+                                    KmsKeyId=os.environ["KMS_Key"],
+                                    SourceRegion=event['resourceId'].split(':')[3]
+                                )
+                                if len(resp['DBSnapshot']) != 0:
+                                    return {
+                                        'statusCode': 200,
+                                        'body': json.dumps('Resource successfully shared!')
+                                    }
+                            except Exception as e:
+                                return {
+                                    'statusCode': 400,
+                                    'body': json.dumps('Failed to share because {}'.format(e))
+                                }   
+                    
+                
+                if event['service'].lower() == 'ebs':
+                    client = boto3.client("ec2", event['region'])
+                    try:
+                        # get ownerId    
+                        res = client.describe_snapshots(
+                            SnapshotIds=[event['resourceId']])
+                            
+                        copied_snap = client.describe_snapshots(Filters=[{'Name': 'tag:Owner', 'Values': [res['Snapshots'][0]['OwnerId']]}])
+                        if len(copied_snap['Snapshots']) > 0:
+                            if copied_snap['Snapshots'][0]['State'] == 'completed':
+                                return {
+                                    'statusCode': 200,
+                                    'body': json.dumps('Resource successfully shared')
+                                }
+                            elif copied_snap['Snapshots'][0]['State'] == 'pending':
+                                return {
+                                    'statusCode': 202,
+                                    'body': json.dumps('Waiting for copy to complete because it\'s in a pending state')
+                                }
+                            else:
+                                # delete snapshot so participant can retry
+                                client.delete_snapshot(
+                                    SnapshotId=copied_snap['Snapshots'][0]['SnapshotId']
+                                )
+                                return {
+                                    'statusCode': 400,
+                                    'body': json.dumps("Failed to share because {}".format(copied_snap['Snapshots'][0]['StateMessage']))
+                                }
+                        else:
+                            copy = client.copy_snapshot(SourceRegion=event['region'],
+                                SourceSnapshotId=event['resourceId'],
+                                TagSpecifications=[
+                                    {
+                                        'ResourceType': 'snapshot',
+                                        'Tags': [
+                                            {
+                                                'Key': 'Owner',
+                                                'Value': res['Snapshots'][0]['OwnerId']
+                                            }
+                                        ]
+                                    }
+                                ])
+                            
+                            if client.describe_snapshots(SnapshotIds=[copy['SnapshotId']])['Snapshots'][0]['StateMessage'] == 'Given key ID is not accessible':
+                                return {
+                                    'statusCode': 400,
+                                    'body': json.dumps("Failed to share because {}".format(copied_snap['Snapshots'][0]['StateMessage']))
+                                }
+                            
+                            return {
+                                'statusCode': 201,
+                                'body': json.dumps("Waiting for copy to complete, Metadata not updated")
+                            }
+                        
+                    except Exception as error:
+                        return {
+                            'statusCode': 400,
+                            'body': json.dumps('Failed to share because {}'.format(error))
+                        }
+                
+                if event['service'].lower() == "s3":
+                    try:
+                        resourceId = event['resourceId'].split(':')[5]
+                        client = boto3.client('s3')
+                        response = client.get_object(
+                            Bucket=resourceId,
+                            Key=client.list_objects_v2(Bucket=resourceId, MaxKeys=1)['Contents'][0]['Key']
+                        )
+
+                        if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                            return {
+                                'statusCode': 200,
+                                'body': json.dumps('Resource successfully shared!')
+                            }
+                
+                    except Exception as error:
+                        return {
+                            'statusCode': 400,
+                            'body': json.dumps('Failed to share because {}'.format(error))
+                        }
+                        
+                
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps('Failed to share.')
+                }
+
+  LambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Website}/*/POST/
+  
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyName: services
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: ServiceActions
+                Action:
+                    - ec2:CopySnapshot
+                    - kms:Decrypt
+                    - ec2:DeleteSnapshot
+                    - ec2:DeleteTags
+                    - rds:DescribeDBSnapshots
+                    - rds:CopyDBSnapshot
+                    - ec2:DescribeTags
+                    - ec2:CreateTags
+                    - s3:ListBucket
+                    - s3:GetObject
+                    - ec2:DescribeSnapshots
+                    - kms:GenerateDataKey*
+                    - iam:SimulatePrincipalPolicy
+                    - kms:Encrypt
+                    - kms:DescribeKey
+                    - kms:CreateGrant
+                    - sts:AssumeRole
+                Effect: Allow
+                Resource: '*'
+              - Sid: LambdaPermissions
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${lambdaFunctionName}:*
+              
+  lambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${lambdaFunctionName}
+      RetentionInDays: 90
+
+  GetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Website
+      ResourceId: !GetAtt Website.RootResourceId
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: 
+          application/json: "{\n \"statusCode\": 200\n}"
+        IntegrationResponses: 
+          - StatusCode: 200
+            ResponseTemplates:
+              text/html: !Sub |
+                          <!DOCTYPE html>
+                          <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+                          <meta content="utf-8" http-equiv="encoding">
+                          <html>
+                          <head>
+                          <style>
+
+                          * {
+                              font-family: Amazon Ember;
+                          }
+
+                          table {
+                            font-family: arial, sans-serif;
+                            border-collapse: collapse;
+                            width: 50%;
+                          }
+
+                          td, th {
+                            border: 1px solid #dddddd;
+                            text-align: left;
+                            padding: 8px;
+                            text-align:center;
+                          }
+
+                          tr:nth-child(even) {
+                            background-color: #dddddd;
+                          }
+
+                          input[type=button], input[type=submit], input[type=reset] {
+                            background-color: #4CAF50;
+                            border: none;
+                            color: white;
+                            padding: 10px 25px;
+                            text-decoration: none;
+                            margin: 4px 2px;
+                            cursor: pointer;
+                          }
+
+                          form {
+                            margin-top: 40px;
+                            text-align: center;
+                            display: flex;
+                            flex-flow:row wrap;
+                            align-items: center;
+                            margin-left: 10px;
+                          }
+
+                          form > * {
+                              margin-right: 10px;
+                          }
+
+                          div > * {
+                              display: flex;
+                              flex-wrap: wrap;
+                              justify-content: center;
+                          }
+
+                          h2 {
+                              text-align: center;
+                          }
+
+                          table {
+                              margin-left: auto;
+                              margin-right: auto;
+                          }
+
+                          .loader {
+                              background-color: gray;
+                              margin:auto;
+                              margin-top: 2%;
+                              padding-top: 10px;
+                              padding-bottom: 10px;
+                              width: 5%;
+                              color: white;
+                              display: none;
+                              text-align:center;
+                          }
+
+
+                          </style>
+                          </head>
+                          <body>
+
+                          <h2>Service Sharing Status</h2>
+
+                          <table>
+                            <tr>
+                              <th>Service</th>
+                              <th>Sharing Status</th>
+                              <th>Last Checked</th>
+                            </tr>
+                            <tr>
+                              <td>S3</td>
+                              <td id="S3_Status">&#10060;</td>
+                              <td id="S3_Time">...</td>
+                            </tr>
+                            <tr>
+                              <td>EBS</td>
+                              <td id="EBS_Status">&#10060;</td>
+                              <td id="EBS_Time">...</td>
+                            </tr>
+                            <tr>
+                              <td>RDS</td>
+                              <td id="RDS_Status">&#10060;</td>
+                              <td id="RDS_Time">...</td>
+                            </tr>
+                          </table>
+
+                          <div>
+                              <form id="S3_Submit" enctype="multipart/form-data" method="POST" onsubmit="return getStatus()">
+                                <label for="fname">S3 Bucket ARN:</label><br>
+                                <input type="text" id="fname_s3" style="color:#888;"><br>
+                                <input onclick="service='s3'" type="submit" value="Submit">
+                              </form> 
+                            
+                              <form id="EBS_Submit" enctype="multipart/form-data" method="POST" onsubmit="return getStatus()">
+                                <label for="fname">EBS Snapshot Id:</label><br>
+                                <input type="text" id="fname_ebs" style="color:#888;"><br>
+                                <label for="fname">Region:</label><br>
+                                <input type="text" id="region_ebs" style="color:#888;"><br>
+                                <input onclick="service='ebs'" type="submit" value="Submit">
+                              </form> 
+                            
+                              <form id="RDS_Submit" enctype="multipart/form-data" method="POST" onsubmit="return getStatus()">
+                                <label for="fname">RDS Snapshot ARN:</label><br>
+                                <input type="text" id="fname_rds" style="color:#888;"><br>
+                                <input onclick="service='rds'" type="submit" value="Submit">
+                              </form> 
+                          </div>
+                          <div><p class="loader" id="Loading">Loading...</p></div>
+
+                          <script>
+                              var service;
+                              // function to call API for to get sharing status of service
+                              function getStatus() {
+                                  event.preventDefault();
+                                  document.getElementById("Loading").style.display = "block"
+                                  resource_id = document.getElementById("fname_" + service).value;
+                                  region = service == 'ebs' ? document.getElementById("region_ebs").value : ""
+
+                                  // make API call to proper service using resource Id
+                                  fetch("https://${Website}.execute-api.${AWS::Region}.amazonaws.com/${StageName}", {
+                                        method: 'POST',
+                                        body: JSON.stringify({service: service, region: region, resourceId: resource_id})
+                                  }).then(function (response) {
+                                      // update table based on response code
+                                      response.text().then(function(text) {
+                                          data = JSON.parse(text)
+                                          if (data.body.includes("Metadata not updated") || data.body.includes("in a pending state")) {
+                                            document.getElementById(service.toUpperCase() + "_Status").innerHTML = "&#8987;" + " Waiting for Copy to complete...";
+                                            document.getElementById(service.toUpperCase() + "_Time").innerHTML = Date();
+                                          } else {
+                                            document.getElementById(service.toUpperCase() + "_Status").innerHTML = data.statusCode == 200 ? "&#9989;" : "&#10060;" + "\"" + data.body.split("because")[1];
+                                            document.getElementById(service.toUpperCase() + "_Time").innerHTML = Date();
+                                          }
+                                          document.getElementById("Loading").style.display = "none"
+                                      })
+
+                                  }).catch(function (err) {
+                                      document.getElementById("Loading").style.display = "none"
+                                      console.warn('Something went wrong.', err);
+                                  })
+
+                              } 
+                          </script>
+                          </body>
+                          </html>
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: {"text/html": "Empty"}
+Outputs:
+  AccountID:
+    Value: !Sub ${AWS::AccountId}
+  InvokeURL:
+    Value: !Sub "https://${Website}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/"

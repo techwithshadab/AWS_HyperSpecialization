@@ -1,0 +1,1047 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Environment setup for the 2021 ReInforce Encryption at Rest Workshop"
+
+Resources:
+  LambdaSetupRole:
+    Type: AWS::IAM::Role
+    DependsOn: KmsCreationPolicy
+    Properties:
+      RoleName: 'LambdaSetupRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref KmsCreationPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+
+  KmsCreationPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: 'KmsCreationPolicy'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'kms:CreateAlias'
+              - 'kms:CreateKey'
+              - 'kms:EnableKey'
+              - 'kms:ListAliases'
+              - 'kms:ListKeys'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DeleteAlias'
+            Resource: '*'
+
+  ConfigBucketAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    DependsOn: WorkshopLogsBucket
+    Properties:
+      ManagedPolicyName: 'ConfigBucketAccessPolicy'
+      Roles:
+        - 'ConfigRecorderRole'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:PutObject"
+              - "s3:GetBucketACL"
+            Resource:
+              - !GetAtt WorkshopLogsBucket.Arn
+              - !Join ["/", [!GetAtt WorkshopLogsBucket.Arn, '*']]
+
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'ConfigRecorderRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - config.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+
+  KMSAdminRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: "KMS_Admin"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: custom
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'kms:*'
+                Resource: 
+                  - !Sub arn:aws:kms::${AWS::AccountId}:key/*
+                  - !Sub arn:aws:kms::${AWS::AccountId}:alias/*
+              - Effect: Allow
+                Action: 
+                  - 'kms:ListAliases'
+                  - 'tag:GetResources'
+                  - 'iam:ListRoles'
+                  - 'iam:ListUsers'
+                Resource:
+                  - '*'
+    
+  ProjectRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: "ProjectRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudTrail_ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSLambda_ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+        - arn:aws:iam::aws:policy/AWSConfigUserAccess
+        - arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: custom
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                - "kms:Decrypt"
+                - "cloudshell:*"
+                - "s3:Get*"
+                - "s3:List*"
+                - "lambda:InvokeAsync"
+                - "s3:PutEncryptionConfiguration"
+                - "kms:Encrypt"
+                - "s3:UpdateJobPriority"
+                - "kms:ReEncryptTo"
+                - "rds:AddTagsToResource"
+                - "cloudtrail:PutEventSelectors"
+                - "lambda:InvokeFunction"
+                - "rds:CopyDBSnapshot"
+                - "cloudtrail:UpdateTrail"
+                - "rds:DeleteDBSnapshot"
+                - "s3:UpdateJobStatus"
+                - "s3:DeleteBucketPolicy"
+                - "config:StartConfigRulesEvaluation"
+                - "kms:ReEncryptFrom"
+                - "s3:PutObject"
+                - "rds:ModifyDBSnapshot"
+                - "cloudtrail:PutInsightSelectors"
+                - "s3:DescribeJob"
+                - "rds:CreateDBSnapshot"
+                - "rds:RestoreDBInstanceFromDBSnapshot"
+                - "cloudtrail:CreateTrail"
+                - "kms:GenerateDataKey*"
+                - "s3:PutBucketPolicy"
+                - "s3:CreateJob"
+                - "rds:ModifyDBSnapshotAttribute"
+                - "kms:CreateGrant"
+                - "rds:DeleteDBInstance"
+                - "iam:Get*"
+                - "iam:List*"
+                - "iam:CreateRole"
+                Resource: '*'
+              - Effect: Allow
+                Action: rds:CreateDBInstance
+                Resource: '*'
+                Condition:
+                  Bool:
+                    rds:StorageEncrypted: "true"
+
+
+  GuidGenerator:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaSetupRole
+    Properties:
+      FunctionName: 'GuidGenerator'
+      Description: 'Generates a GUID to be used with creating unique bucket names'
+      Handler: index.handler
+      Runtime: python3.7
+      Timeout: 10
+      Role: !GetAtt LambdaSetupRole.Arn
+      Code:
+        ZipFile: |
+          import uuid
+          import json
+          import cfnresponse
+          def handler(event, context):
+            responseData = {}
+            responseData['Data'] = str(uuid.uuid4())
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+  CrossRegionKeyGenerator:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaSetupRole
+    Properties:
+      FunctionName: 'CrossRegionKeyGenerator'
+      Description: 'Generates a key for RDS, S3, and EBS in eu-west-1(Ireland)'
+      Handler: index.handler
+      Runtime: python3.7
+      Timeout: 10
+      Role: !GetAtt LambdaSetupRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+              try:
+                  crossRegionClient = boto3.client("kms", region_name='eu-west-1')
+                  if event['RequestType'] == 'Create':
+                      response = crossRegionClient.create_key(Description='CrossRegion Key for S3',KeyUsage='ENCRYPT_DECRYPT',CustomerMasterKeySpec='SYMMETRIC_DEFAULT',Origin='AWS_KMS')
+                      responseAlias = crossRegionClient.create_alias(AliasName='alias/workshop/s3/region2',TargetKeyId=response['KeyMetadata']['KeyId'])
+                      response = crossRegionClient.create_key(Description='CrossRegion Key for EBS',KeyUsage='ENCRYPT_DECRYPT',CustomerMasterKeySpec='SYMMETRIC_DEFAULT',Origin='AWS_KMS')
+                      responseAlias = crossRegionClient.create_alias(AliasName='alias/workshop/ebs/region2',TargetKeyId=response['KeyMetadata']['KeyId'])
+                      response = crossRegionClient.create_key(Description='CrossRegion Key for RDS',KeyUsage='ENCRYPT_DECRYPT',CustomerMasterKeySpec='SYMMETRIC_DEFAULT',Origin='AWS_KMS')
+                      responseAlias = crossRegionClient.create_alias(AliasName='alias/workshop/rds/region2',TargetKeyId=response['KeyMetadata']['KeyId'])
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  else:
+                      keys = crossRegionClient.list_keys(Limit=10)
+                      print(keys)
+                      for curKey in keys['Keys']:
+                          try:
+                              aliasResponse = crossRegionClient.delete_alias(AliasName='alias/workshop/s3/region2')
+                              aliasResponse = crossRegionClient.delete_alias(AliasName='alias/workshop/rds/region2')
+                              aliasResponse = crossRegionClient.delete_alias(AliasName='alias/workshop/ebs/region2')
+                              deleteResponse = crossRegionClient.schedule_key_deletion(KeyId=curKey['KeyId'],PendingWindowInDays=7)
+                          except Exception as ex:
+                              print("Falied to delete key. Continuing...")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as ex:
+                  print("Caught error: ", str(ex))
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  GuidGeneratorInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    DependsOn: GuidGenerator
+    Properties:
+      ServiceToken: !GetAtt GuidGenerator.Arn
+
+  KeyCreationInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    DependsOn: CrossRegionKeyGenerator
+    Properties:
+      ServiceToken: !GetAtt CrossRegionKeyGenerator.Arn
+
+  WorkshopLogsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: GuidGeneratorInvoke
+    Properties:
+      BucketName: !Join ["-", ["workshop-logs-bucket", !GetAtt GuidGeneratorInvoke.Data]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: "aws/s3"
+              SSEAlgorithm: "aws:kms"
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: WorkshopLogsBucket
+    Properties:
+      Bucket: !Join ["-", ["workshop-logs-bucket", !GetAtt GuidGeneratorInvoke.Data]]
+      PolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: !GetAtt WorkshopLogsBucket.Arn
+          - Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: !Join ['/', [!GetAtt WorkshopLogsBucket.Arn, "*"]]
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: "bucket-owner-full-control"
+
+  SharedTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: LogsBucketPolicy
+    Properties:
+          IncludeGlobalServiceEvents: true
+          IsLogging: true
+          IsMultiRegionTrail: true
+          S3BucketName: !Join ["-", ["workshop-logs-bucket", !GetAtt GuidGeneratorInvoke.Data]]
+          Tags:
+            - Key: "DO NOT DELETE"
+              Value: "THIS IS PART OF THE WORKSHOP SETUP"
+            - Key: "CloudTrailName"
+              Value: "SharedLogsTrail"
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    DependsOn: [ConfigRecorderRole, LogsBucketPolicy]
+    Properties:
+      Name: "ConfigRecorder"
+      RecordingGroup:
+        AllSupported: false
+        IncludeGlobalResourceTypes: false
+        ResourceTypes:
+          - AWS::EC2::Volume
+          - AWS::RDS::DBInstance
+          - AWS::RDS::DBSnapshot
+          - AWS::RDS::DBCluster
+          - AWS::RDS::DBClusterSnapshot
+          - AWS::S3::Bucket
+      RoleARN: !GetAtt ConfigRecorderRole.Arn
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    DependsOn: [ConfigRecorderRole, LogsBucketPolicy]
+    Properties:
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: "TwentyFour_Hours"
+      Name: "WorkshopConfigDeliveryChannel"
+      S3BucketName: !Join ["-", ["workshop-logs-bucket", !GetAtt GuidGeneratorInvoke.Data]]
+      S3KeyPrefix: "ConfigLogs"
+
+  #WorkshopAthenaWorkGroup:
+  #  Type: AWS::Athena::WorkGroup
+  #  Properties:
+  #    Name: WorkshopWorkGroup
+  #    Description: WorkGroup for Encryption at Rest Workshop
+  #    State: ENABLED
+  #    WorkGroupConfiguration:
+  #      BytesScannedCutoffPerQuery: 20000000000
+  #      EnforceWorkGroupConfiguration: false
+  #      PublishCloudWatchMetricsEnabled: false
+  #      RequesterPaysEnabled: true
+  #      ResultConfiguration:
+  #        OutputLocation: !Join ['/', [!GetAtt WorkshopLogsBucket.Arn, "AthenaLogs"]]
+
+  #AthenaTableFromGlue:
+  #  Type: AWS::Glue::Table
+  #    Properties:
+  #      CatalogId: !Ref "AWS::AccountId"
+  #      DatabaseName: "CloudTrailLogs"
+  #      TableInput:
+  #        Description: "CloudTrail Logs Athena Table"
+  #        Name: "CtLogs"
+  #        Parameters: Json
+  #        PartitionKeys: []
+  #        StorageDescriptor:
+  #          StorageDescriptor
+  #        TableType: String
+  #        TargetTable:
+  #          TableIdentifier
+  #        ViewExpandedText: String
+  #        ViewOriginalText: String
+
+  ebsEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: EBS_Volumes_Encrypted
+      Source:
+        Owner: AWS
+        SourceIdentifier: 'ENCRYPTED_VOLUMES'
+
+  rdsEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: RDS_Storage_Encrypted
+      Source:
+        Owner: AWS
+        SourceIdentifier: 'RDS_STORAGE_ENCRYPTED'
+
+  rdsSnapshotEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: RDS_Snapshots_Encrypted
+      Source:
+        Owner: AWS
+        SourceIdentifier: 'RDS_SNAPSHOT_ENCRYPTED'
+
+  s3EncryptionRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: S3_Default_Encryption_Enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: 'S3_DEFAULT_ENCRYPTION_KMS'
+
+  sharedVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.1.0.0/16'
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: workshop-vpc
+
+  subnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: sharedVpc
+    Properties:
+      CidrBlock: '10.1.0.0/24'
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", "c"]]
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref sharedVpc
+
+  subnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: sharedVpc
+    Properties:
+      CidrBlock: '10.1.1.0/24'
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", "b"]]
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref sharedVpc
+
+  nat1:
+    Type: AWS::EC2::NatGateway
+    DependsOn: subnet1
+    Properties:
+      ConnectivityType: 'private'
+      SubnetId: !Ref subnet1
+
+  nat2:
+    Type: AWS::EC2::NatGateway
+    DependsOn: subnet2
+    Properties:
+      ConnectivityType: 'private'
+      SubnetId: !Ref subnet2
+
+  routeTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: sharedVpc
+    Properties:
+      VpcId: !Ref sharedVpc
+
+  routeTable2:
+    Type: AWS::EC2::RouteTable
+    DependsOn: sharedVpc
+    Properties:
+      VpcId: !Ref sharedVpc
+
+  assignTable1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - routeTable1
+      - subnet1
+    Properties:
+      RouteTableId: !Ref routeTable1
+      SubnetId: !Ref subnet1
+
+  assignTable2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - routeTable2
+      - subnet2
+    Properties:
+      RouteTableId: !Ref routeTable2
+      SubnetId: !Ref subnet2
+
+  route1:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - nat1
+      - routeTable1
+    Properties:
+      NatGatewayId: !Ref nat1
+      RouteTableId: !Ref routeTable1
+      DestinationCidrBlock: 0.0.0.0/0
+
+  route2:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - nat2
+      - routeTable2
+    Properties:
+      NatGatewayId: !Ref nat2
+      RouteTableId: !Ref routeTable2
+      DestinationCidrBlock: 0.0.0.0/0
+
+  #s3route1:
+  #  Type: AWS::EC2::Route
+  #  DependsOn:
+  #    - S3Endpoint
+  #    - routeTable1
+  #  Properties:
+  #    DestinationCidrBlock: 0.0.0.0/0
+  #    VpcEndpointId: !Ref S3Endpoint
+  #    RouteTableId: !Ref routeTable1
+
+  #s3route2:
+  #  Type: AWS::EC2::Route
+  #  DependsOn:
+  #    - S3Endpoint
+  #    - routeTable2
+  #    DestinationCidrBlock: 0.0.0.0/0
+  #    VpcEndpointId: !Ref S3Endpoint
+  #    RouteTableId: !Ref routeTable2
+
+  S3Endpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    DependsOn: sharedVpc
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 's3:*'
+            Resource:
+              - 'arn:aws:s3:::*'
+      RouteTableIds:
+        - !Ref routeTable1
+        - !Ref routeTable2
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref sharedVpc
+
+  ssmEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    DependsOn: sharedVpc
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 'ssm:*'
+            Resource: '*'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcId: !Ref sharedVpc
+      VpcEndpointType: 'Interface'
+
+  ssmMessageEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    DependsOn: sharedVpc
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 'ssm-messages:*'
+            Resource: '*'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcId: !Ref sharedVpc
+      VpcEndpointType: 'Interface'
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref sharedVpc
+      GroupDescription: Enable All
+      SecurityGroupIngress:
+      - IpProtocol: '-1'
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 10.1.0.0/16
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DependsOn:
+      - DBSubnetGroup
+      - DBSecurityGroup
+    Properties:
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBName: UnencryptedDatabase
+      Engine: MySQL
+      PubliclyAccessible: false
+      MasterUsername: admin
+      DBInstanceClass: db.t2.micro
+      VPCSecurityGroups:
+      - !GetAtt [DBSecurityGroup, GroupId]
+      AllocatedStorage: '5'
+      MasterUserPassword: password
+      StorageType: gp2
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    DependsOn:
+      - subnet1
+      - subnet2
+    Properties:
+      DBSubnetGroupDescription: "DBSubnetGroup for RDS MySql instance"
+      DBSubnetGroupName: DBSubnetGroup
+      SubnetIds:
+        - !Ref subnet1
+        - !Ref subnet2
+
+  DemoCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      EnableLogFileValidation: true
+      IsMultiRegionTrail: false
+      S3BucketName:
+        Ref: SimpleCloudTrailBucket
+      TrailName:
+        Fn::Sub: "workshop-kms-s3-${AWS::AccountId}"
+      EventSelectors:
+      - IncludeManagementEvents: true
+        ReadWriteType: All
+      - DataResources:
+        - Type: AWS::S3::Object
+          Values:
+          - 'arn:aws:s3:::'
+        - Type: AWS::Lambda::Function
+          Values:
+          - arn:aws:lambda
+        ReadWriteType: All
+    DependsOn:
+    - SimpleCloudTrailBucketPolicy
+  SimpleCloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: "workshop-kms-s3-cloudtrail-${AWS::AccountId}"
+
+  SimpleCloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: SimpleCloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AWSCloudTrailBucketAuthorization
+          Effect: Allow
+          Principal:
+            Service:
+            - cloudtrail.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::GetAtt:
+            - SimpleCloudTrailBucket
+            - Arn
+        - Sid: " AllowCloudTrailDelivery"
+          Effect: Allow
+          Principal:
+            Service:
+            - cloudtrail.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Join:
+            - ''
+            - - Fn::GetAtt:
+                - SimpleCloudTrailBucket
+                - Arn
+              - "/AWSLogs/*"
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+
+  s3BatchBucketPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName:
+        Fn::Sub: "workshop-kms-s3-s3batch-${AWS::AccountId}"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action:
+          - s3:PutObject
+          - s3:PutObjectAcl
+          - s3:PutObjectTagging
+          Effect: Allow
+          Resource:
+            Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Action:
+          - s3:GetObject
+          - s3:GetObjectAcl
+          - s3:GetObjectTagging
+          - s3:ListBucket
+          Effect: Allow
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          - s3:GetObjectVersion
+          Resource:
+          - Fn::Sub: arn:aws:s3:::workshop-kms-s3-utility-${AWS::AccountId}/*
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          Resource:
+          - Fn::Sub: arn:aws:s3:::workshop-kms-s3-utility-${AWS::AccountId}/*
+        - Effect: Allow
+          Action:
+          - s3:DeleteObjectTagging
+          - s3:DeleteObjectVersionTagging
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action:
+          - s3:PutObjectAcl
+          - s3:PutObjectVersionAcl
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action:
+          - s3:RestoreObject
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action: s3:GetBucketObjectLockConfiguration
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action:
+          - s3:PutObjectRetention
+          - s3:BypassGovernanceRetention
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action: s3:GetBucketObjectLockConfiguration
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+        - Effect: Allow
+          Action: s3:PutObjectLegalHold
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SimpleCloudTrailBucket}/*
+    DependsOn:
+    - SimpleCloudTrailBucket
+  s3BatchSimpleCloudTrailBucketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: "workshop-kms-s3-CloudTrailS3Batch-${AWS::AccountId}"
+      ManagedPolicyArns:
+      - Ref: s3BatchBucketPolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: batchoperations.s3.amazonaws.com
+          Action: sts:AssumeRole
+    DependsOn:
+    - s3BatchBucketPolicy
+
+  workshopSSMParameterS3BucketLocation:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/SecurityWorkshop/DemoCloudTrailS3Bucket"
+      Value:
+        Ref: SimpleCloudTrailBucket
+      Tier: Standard
+      Type: String
+    DependsOn:
+    - SimpleCloudTrailBucket
+
+  UtilityS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: "workshop-kms-s3-utility-${AWS::AccountId}"
+
+  UtilityBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: UtilityS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: DenyAccessToNonAWSPrincipals
+          Effect: Deny
+          NotPrincipal:
+            AWS: "*"
+          Action: s3:*
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${UtilityS3Bucket}
+          - Fn::Sub: arn:aws:s3:::${UtilityS3Bucket}/*
+        - Sid: DenyNonCompilantTLS
+          Effect: Deny
+          Principal:
+            AWS: "*"
+          Action: s3:*
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${UtilityS3Bucket}
+          - Fn::Sub: arn:aws:s3:::${UtilityS3Bucket}/*
+          Condition:
+            StringNotEquals:
+              s3:TlsVersion:
+              - '1.2'
+              - '1.3'
+    DependsOn:
+    - UtilityS3Bucket
+  workshopSSMParameterUtilityS3BucketLocation:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/SecurityWorkshop/UtilityS3Bucket"
+      Value:
+        Ref: UtilityS3Bucket
+      Tier: Standard
+      Type: String
+    DependsOn:
+    - UtilityS3Bucket
+
+  s3InventoryLambdaRolePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: !Sub 's3inventory-lambda-policy-${AWS::AccountId}'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowCreateCloudwatchLogGroup
+            Effect: Allow
+            Action: 'logs:CreateLogGroup'
+            Resource: !Sub >-
+              arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+          - Sid: AllowLogGroupOperations
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Sub >-
+              arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+          - Sid: AllowSSMParameterAccess
+            Effect: Allow
+            Action:
+              - 'ssm:GetParameters'
+              - 'ssm:GetParameter'
+            Resource:
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/SecurityWorkshop/DemoCloudTrailS3Bucket
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/SecurityWorkshop/UtilityS3Bucket
+          - Sid: VisualEditor3
+            Effect: Allow
+            Action:
+              - 's3:List*'
+              - 's3:Describe*'
+              - 's3:Get*'
+              - 's3:PutObject'
+            Resource:
+              - !Sub "arn:aws:s3:::workshop-kms-s3-cloudtrail-${AWS::AccountId}/*"
+              - !Sub arn:aws:s3:::${UtilityS3Bucket}/*
+              - !Sub "arn:aws:s3:::workshop-kms-s3-cloudtrail-${AWS::AccountId}"
+              - !Sub arn:aws:s3:::${UtilityS3Bucket}
+  s3InventoryLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub 'workshop-kms-s3-s3inventory-lambda-role-${AWS::AccountId}'
+      ManagedPolicyArns:
+        - !Ref s3InventoryLambdaRolePolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+  s3InventoryLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: !GetAtt
+        - s3InventoryLambdaRole
+        - Arn
+      Description: S3 Manifest Generation Lambda function
+      Runtime: nodejs14.x
+      MemorySize: 2048
+      FunctionName: !Sub 'workshop-kms-s3-s3inventory-${AWS::AccountId}'
+      Timeout: 900
+      Handler: index.handler
+      Code:
+        ZipFile: |
+            const aws = require('aws-sdk');
+            var srcBucket = null;
+            var dstBucket = null;
+            // read S3 bucket and generate s3 batch job manifest listing files that have not been encrypted
+            exports.handler = async (event) => {
+                srcBucket = (await getSSMParameter('/SecurityWorkshop/DemoCloudTrailS3Bucket'))['Parameter']['Value'];
+                dstBucket = (await getSSMParameter('/SecurityWorkshop/UtilityS3Bucket'))['Parameter']['Value'];
+                var manifestData = [];
+                const s3SourceBucketOptions = {
+                    Bucket: srcBucket,
+                    // ContinuationToken: 'STRING_VALUE',
+                    // Delimiter: 'STRING_VALUE',
+                    // EncodingType: url,
+                    FetchOwner: false,
+                    //MaxKeys: 500,
+                    // Prefix: 'STRING_VALUE',
+                    // RequestPayer: requester,
+                    // StartAfter: 'STRING_VALUE'
+                };
+                let s3client = new aws.S3();
+                let asyncJobs = [];
+                let keyList = [];
+
+                for await (const data of listAllKeys(s3SourceBucketOptions)) {
+                    for (let s3Object of data.Contents) {
+                        keyList.push(s3Object['Key']);
+                        asyncJobs.push(
+                            s3client.headObject({
+                                Key: s3Object['Key'],
+                                Bucket: srcBucket
+                            }).promise());
+                    }
+                }
+
+                let asyncResults = await Promise.allSettled(asyncJobs);
+
+                try {
+
+                    for (let index = 0; index < asyncResults.length; index++) {
+                        if (asyncResults[index]['status'] == 'fulfilled') {
+                            if (!(asyncResults[index]['value']['ServerSideEncryption'])) {
+                                // the object is not encrypted
+                                manifestData.push(srcBucket + ',' + keyList[index]);
+                            }
+                            else if (asyncResults[index]['value']['ServerSideEncryption'] == 'AES256') {
+                                // the object is encrypted with SSE-S3
+                                manifestData.push(srcBucket + ',' + keyList[index]);
+                            }
+                            else {
+                                // the object is already encrypted with kms, ignore it
+                                manifestData.push(srcBucket + ',' + keyList[index]);
+                            }
+
+                        }
+                    }
+                }
+                catch (e) {
+                    console.log('S3 batch manifest generation exception' + JSON.stringify(e));
+                }
+                finally {
+                    // attempt to close the file
+
+                }
+
+                let responseValue = manifestData.join('\n');
+                // copy the object to s3 bucket
+                await copyObjectToS3(dstBucket, 'manifestdata.txt', responseValue);
+                return responseValue;
+            };
+
+
+            async function* listAllKeys(opts) {
+                const s3 = new aws.S3();
+                opts = { ...opts };
+                do {
+                    const data = await s3.listObjectsV2(opts).promise();
+                    opts.ContinuationToken = data.NextContinuationToken;
+                    yield data;
+                } while (opts.ContinuationToken);
+            }
+
+
+            function getS3HeadObject(bucket, key) {
+                var params =
+                {
+                    Key: key,
+                    Bucket: bucket
+                };
+                let s3client = new aws.S3({ apiVersion: '2006-03-01' });
+                return s3client.headObject(params).promise();
+            }
+
+            // utility function to retreive an S3 object
+            function copyObjectToS3(bucketName, objectKey, content) {
+                var params = {
+                    Key: objectKey,
+                    Bucket: bucketName,
+                    Body: Buffer.from(content, "utf8")
+                };
+                let s3client = new aws.S3({ apiVersion: '2006-03-01' });
+                return s3client.upload(params).promise();
+            }
+
+
+            function getSSMParameter(path) {
+                let ssmclient = new aws.SSM();
+                var params = {
+                    Name: path
+                };
+                return ssmclient.getParameter(params).promise();
+
+            }
+    DependsOn:
+      - s3InventoryLambdaRole
+
+Outputs:
+  UtilityS3BucketARN:
+    Value:
+      Fn::GetAtt:
+      - UtilityS3Bucket
+      - Arn
+  SSMParamterForUtilityS3Bucket:
+    Value:
+      Ref: workshopSSMParameterUtilityS3BucketLocation
+
+  CloudTrailBucketARN:
+    Value:
+      Fn::GetAtt:
+      - SimpleCloudTrailBucket
+      - Arn
+  CloudTrailS3BatchPolicyARN:
+    Value:
+      Ref: s3BatchBucketPolicy
+  CloudTrailARN:
+    Value:
+      Fn::GetAtt:
+      - DemoCloudTrail
+      - Arn
+  CloudTrailS3BatchRoleARN:
+    Value:
+      Ref: s3BatchSimpleCloudTrailBucketRole
+  SSMParamterForCloudTrailS3Bucket:
+    Value:
+      Ref: workshopSSMParameterS3BucketLocation
+  PolicyArn:
+    Value: !Ref s3InventoryLambdaRolePolicy
+  RoleArn:
+    Value: !GetAtt
+      - s3InventoryLambdaRole
+      - Arn
+  LambdaArn:
+    Value: !GetAtt
+      - s3InventoryLambda
+      - Arn
+
+
+
+
+#create an athena table for the logs - On hold, this is more complicated than first thought
+#Merge the Key policy so there is one workshop key
+
+# Finished on friday 6/25 with all merged tracks
+# docs and template in EE all done on 6/24
+# Policy for student Role
+#
